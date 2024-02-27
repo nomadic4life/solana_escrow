@@ -125,6 +125,32 @@ pub mod solana_escrow {
 
         return Ok(());
     }
+
+    pub fn collect_escrow_on_sol(ctx: Context<CollectEscrowOnSol>) -> Result<()> {
+        // INPUTS:
+        //  nodes
+
+        // check unlock conditions
+        // compute merkel root from nodes and signer account
+        // transfer sol
+        // close escrow account
+
+        let CollectEscrowOnSol {
+            escrow_account,
+            program_authority,
+            signer,
+            ..
+        } = ctx.accounts;
+
+        program_authority.sub_lamports(escrow_account.balance)?;
+        signer.add_lamports(escrow_account.balance)?;
+
+        let lamports = escrow_account.get_lamports();
+        escrow_account.sub_lamports(lamports)?;
+        program_authority.add_lamports(lamports)?;
+
+        return Ok(());
+    }
 }
 
 #[error_code]
@@ -263,6 +289,24 @@ pub struct OpenEscrowAccountTargetToken<'info> {
 
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CollectEscrowOnSol<'info> {
+    #[account(mut)]
+    pub signer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"signer"],
+        bump = program_authority.bump
+    )]
+    pub program_authority: Account<'info, ProgramAuthority>,
+
+    #[account(mut)]
+    pub escrow_account: Account<'info, EscrowAccount>,
+
     pub system_program: Program<'info, System>,
 }
 
