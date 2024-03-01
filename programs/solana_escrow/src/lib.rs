@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{transfer, Mint, Token, TokenAccount, Transfer};
-use borsh::{BorshDeserialize, BorshSerialize};
+// use borsh::{BorshDeserialize, BorshSerialize};
 use core::convert::AsRef;
 // use std::io::Error;
 // use std::io::Read;
@@ -12,6 +12,8 @@ declare_id!("HNnEWxRvbw5Kf5oCkgTeLa1BNM4racVQELGrEn4K9GQd");
 
 #[program]
 pub mod solana_escrow {
+    // use anchor_lang::accounts::signer;
+
     use super::*;
 
     pub fn initialize_program_signer(ctx: Context<InitializeProgramAuthority>) -> Result<()> {
@@ -58,6 +60,7 @@ pub mod solana_escrow {
         let Params {
             amount,
             merkle_root,
+            period,
         } = data;
 
         solana_program::program::invoke(
@@ -76,10 +79,11 @@ pub mod solana_escrow {
         let clock = Clock::get()?;
 
         new_escrow_account.initial_date = clock.unix_timestamp;
+        new_escrow_account.maturity_date = clock.unix_timestamp + 86400 * period;
         new_escrow_account.sender = sender.key();
         new_escrow_account.balance = amount;
         new_escrow_account.merkle_root = merkle_root;
-        new_escrow_account.asset = AssetAccountType::SOL;
+        new_escrow_account.asset = AssetAccountType::Sol;
 
         return Ok(());
     }
@@ -101,6 +105,7 @@ pub mod solana_escrow {
         let Params {
             amount,
             merkle_root,
+            period,
         } = data;
 
         transfer(
@@ -118,20 +123,25 @@ pub mod solana_escrow {
         let clock = Clock::get()?;
 
         new_escrow_account.initial_date = clock.unix_timestamp;
+        new_escrow_account.maturity_date = clock.unix_timestamp + 86400 * period;
         new_escrow_account.sender = sender.key();
         new_escrow_account.balance = amount;
         new_escrow_account.merkle_root = merkle_root;
-        new_escrow_account.asset = AssetAccountType::TOKEN { mint: mint.key() };
+        new_escrow_account.asset = AssetAccountType::Token { mint: mint.key() };
 
         return Ok(());
     }
 
-    pub fn collect_escrow_on_sol(ctx: Context<CollectEscrowOnSol>) -> Result<()> {
+    pub fn collect_escrow_on_sol(
+        ctx: Context<CollectEscrowOnSol>,
+        nodes: Vec<Pubkey>,
+        ipos: u8,
+    ) -> Result<()> {
         // INPUTS:
-        //  nodes
+        //  nodes, depth
 
-        // check unlock conditions
         // compute merkel root from nodes and signer account
+        // check if merkel root is the expected merkel root
         // transfer sol
         // close escrow account
 
@@ -142,8 +152,110 @@ pub mod solana_escrow {
             ..
         } = ctx.accounts;
 
+        // let clock = Clock::get()?;
+        // if escrow_account.maturity_date > clock.unix_timestamp {
+        //     return err!(MyError::UnlockConditionFail);
+        // }
+
+        let mut pos = ipos;
+        let mut current = solana_program::hash::Hash::new(signer.key().as_ref());
+
+        for node in nodes {
+            let mut hash = solana_program::hash::Hasher::default();
+
+            if pos % 2 == 0 {
+                hash.hash(node.key().as_ref());
+                hash.hash(current.as_ref());
+            } else {
+                hash.hash(current.as_ref());
+                hash.hash(node.key().as_ref());
+            }
+
+            pos = pos % 2 + pos / 2;
+            current = hash.result();
+        }
+
+        if current.as_ref() != escrow_account.merkle_root.as_ref() {
+            return err!(MyError::UnlockConditionFail);
+        }
+
         program_authority.sub_lamports(escrow_account.balance)?;
         signer.add_lamports(escrow_account.balance)?;
+
+        let lamports = escrow_account.get_lamports();
+        escrow_account.sub_lamports(lamports)?;
+        program_authority.add_lamports(lamports)?;
+
+        return Ok(());
+    }
+
+    pub fn collect_escrow_on_token(
+        ctx: Context<CollectEscrowOnToken>,
+        nodes: Vec<Pubkey>,
+        ipos: u8,
+    ) -> Result<()> {
+        // INPUTS:
+        //  nodes, depth
+
+        // compute merkel root from nodes and signer account
+        // check if merkel root is the expected merkel root
+        // transfer token
+        // close escrow account
+
+        let CollectEscrowOnToken {
+            escrow_account,
+            program_authority,
+            signer,
+            recipient_token,
+            authority_token,
+            token_program,
+            ..
+        } = ctx.accounts;
+
+        // let clock = Clock::get()?;
+        // if escrow_account.maturity_date > clock.unix_timestamp {
+        //     return err!(MyError::UnlockConditionFail);
+        // }
+
+        // should abstract this functionality.
+        let mut pos = ipos;
+        let mut current = solana_program::hash::Hash::new(signer.key().as_ref());
+
+        for node in nodes {
+            let mut hash = solana_program::hash::Hasher::default();
+
+            if pos % 2 == 0 {
+                hash.hash(node.key().as_ref());
+                hash.hash(current.as_ref());
+            } else {
+                hash.hash(current.as_ref());
+                hash.hash(node.key().as_ref());
+            }
+
+            pos = pos % 2 + pos / 2;
+            current = hash.result();
+        }
+
+        if current.as_ref() != escrow_account.merkle_root.as_ref() {
+            return err!(MyError::UnlockConditionFail);
+        }
+
+        let bump = program_authority.bump.to_le_bytes();
+        let inner = vec!["signer".as_ref(), bump.as_ref()];
+        let outer = vec![inner.as_slice()];
+
+        transfer(
+            CpiContext::new_with_signer(
+                token_program.to_account_info(),
+                Transfer {
+                    from: authority_token.to_account_info(),
+                    to: recipient_token.to_account_info(),
+                    authority: program_authority.to_account_info(),
+                },
+                &outer,
+            ),
+            escrow_account.balance,
+        )?;
 
         let lamports = escrow_account.get_lamports();
         escrow_account.sub_lamports(lamports)?;
@@ -157,13 +269,13 @@ pub mod solana_escrow {
 pub enum MyError {
     #[msg("MyAccount may only hold data below 100")]
     DataTooLarge,
+
+    #[msg("unlock condition is not met.")]
+    UnlockConditionFail,
 }
 
 #[derive(Accounts)]
 pub struct InitializeProgramAuthority<'info> {
-    // payer
-    // new program authority
-    // system program
     #[account(mut)]
     pub payer: Signer<'info>,
 
@@ -256,19 +368,14 @@ pub struct OpenEscrowAccountTargetToken<'info> {
     #[account(
         mut,
         constraint = sender_token.owner.key() == sender.key()
+        && sender_token.mint.key() == mint.key(),
     )]
     pub sender_token: Account<'info, TokenAccount>,
 
     #[account(
         mut,
-        // maybe could just use the owner constraint?
-        constraint = authority_token.owner.key() == program_authority.key(),
-        // seeds = [
-        //     program_authority.key().as_ref(),
-        //     token_program.key().as_ref(),
-        //     mint.key().as_ref(),
-        // ],
-        // bump
+        constraint = authority_token.owner.key() == program_authority.key()
+        && authority_token.mint.key() == mint.key(),
     )]
     pub authority_token: Account<'info, TokenAccount>,
 
@@ -279,6 +386,7 @@ pub struct OpenEscrowAccountTargetToken<'info> {
         seeds = [
             sender.key().as_ref(),
             data.merkle_root.as_ref(),
+            mint.key().as_ref()
         ],
         bump
     )]
@@ -310,6 +418,42 @@ pub struct CollectEscrowOnSol<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct CollectEscrowOnToken<'info> {
+    #[account(mut)]
+    pub signer: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"signer"],
+        bump = program_authority.bump
+    )]
+    pub program_authority: Account<'info, ProgramAuthority>,
+
+    #[account(
+        mut,
+        constraint = recipient_token.owner.key() == signer.key()
+        && recipient_token.mint.key() == mint.key(),
+    )]
+    pub recipient_token: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = authority_token.owner.key() == program_authority.key()
+        && authority_token.mint.key() == mint.key(),
+    )]
+    pub authority_token: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub escrow_account: Account<'info, EscrowAccount>,
+
+    pub mint: Account<'info, Mint>,
+
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
 #[account]
 pub struct ProgramAuthority {
     pub is_initialized: bool,
@@ -323,16 +467,17 @@ pub struct ProgramAuthority {
 #[account]
 pub struct EscrowAccount {
     pub initial_date: i64,
+    pub maturity_date: i64,
     pub sender: Pubkey,
-    pub merkle_root: Hasher,
+    pub merkle_root: Pubkey,
     pub balance: u64,
     pub asset: AssetAccountType,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub enum AssetAccountType {
-    SOL,
-    TOKEN { mint: Pubkey },
+    Sol,
+    Token { mint: Pubkey },
 }
 
 impl ProgramAuthority {
@@ -341,6 +486,7 @@ impl ProgramAuthority {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Hasher {
+    // should call Hasher to Node
     pub hash: [u8; 32],
 }
 
@@ -353,18 +499,34 @@ impl AsRef<[u8]> for Hasher {
 impl AssetAccountType {
     fn init(varient: u8) -> usize {
         match varient {
-            0 => return 8 + 8 + 32 + 32 + 8 + 1,
-            1 => return 8 + 8 + 32 + 32 + 8 + 1 + 32,
-            _ => return 8 + 8 + 32 + 32 + 8 + 1,
+            0 => return 8 + 8 + 8 + 32 + 32 + 8 + 1,
+            1 => return 8 + 8 + 8 + 32 + 32 + 8 + 1 + 32,
+            _ => return 8 + 8 + 8 + 32 + 32 + 8 + 1,
         }
     }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Params {
-    pub merkle_root: Hasher,
+    pub merkle_root: Pubkey,
     pub amount: u64,
+    pub period: i64,
 }
+
+// #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+// pub struct NodeParams {
+//     depth: u8,
+//     nodes: [Hasher; 4],
+// }
+
+// impl fmt::Display for Hasher {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         write!(f, "({})", self)
+//     }
+// }
+
+// doesn't work... why? says Type not found
+// type Hash = Pubkey;
 
 // impl AnchorDeserialize for Hash {
 //     fn deserialize_reader<R>(reader: &mut R) -> core::result::Result<Self, Error>

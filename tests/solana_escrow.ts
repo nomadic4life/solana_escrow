@@ -1,3 +1,6 @@
+import assert from 'assert';
+import * as borsh from "@coral-xyz/borsh";
+// import bs58 from "bs58";
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { SolanaEscrow } from "../target/types/solana_escrow";
@@ -26,6 +29,21 @@ const {
   SystemProgram,
 } = anchor.web3
 
+class TokenAccount {
+  // mint:              Pubkey
+  // owner:             Pubkey
+  // amount:            u64
+  // delegate:          ?Pubkey
+  // state:             AccountState
+  // is_native:         ?u64
+  // delgated_amount:   u64
+  // close_authority:   ?Pubkey
+
+  // AccountState
+  //  Uninitialized:  0
+  //  Initialized:    1
+  //  Frozen:         2
+}
 
 
 class Token {
@@ -195,6 +213,106 @@ class User {
   }
 }
 
+
+
+
+const createMerleRoot = (list, pos) => {
+
+  const merge = (a, b) => {
+    const hash = createHash('sha256');
+    hash.update(a)
+    hash.update(b)
+
+    return hash.digest()
+  }
+
+  const iterate = (list, bucket) => {
+    const nodes = []
+
+    for (let i = 1; i < list.length; i += 2) {
+      nodes.push(merge(list[i - 1], list[i]))
+    }
+
+    bucket.push(nodes)
+    return nodes.length
+  }
+
+
+
+
+  const bucket = [list]
+  let size = list.length
+
+  while (size != 1) {
+
+    const nodes = bucket.slice(-1)[0];
+
+    if (nodes.length % 2 !== 0) {
+      nodes.push(nodes.slice(-1)[0])
+    }
+
+    size = iterate(nodes, bucket)
+  }
+
+  const nodes = []
+  if (!verify(bucket, pos, nodes)) {
+    return null
+  }
+
+  return nodes
+}
+
+const verify = (bucket, pos, list) => {
+
+  const merge = (a, b) => {
+    const hash = createHash('sha256');
+    hash.update(a)
+    hash.update(b)
+
+    return hash.digest()
+  }
+
+  const test = []
+  bucket.map(nodes => {
+
+    let index = pos - 1
+
+    if (pos % 2 == 0) {
+      test.push({
+        value: nodes[index - 1],
+        target: nodes[index],
+        hashed: merge(nodes[index - 1], nodes[index]),
+      })
+
+    } else if (nodes[index + 1] !== undefined) {
+
+      test.push({
+        value: nodes[index + 1],
+        target: nodes[index],
+        hashed: merge(nodes[index], nodes[index + 1]),
+      })
+    } else {
+      test.push({
+        value: nodes[index],
+        target: nodes[index],
+        hashed: nodes[index],
+      })
+    }
+
+    pos = pos % 2 + Math.floor(pos / 2);
+  })
+
+  for (let i = 0; i < test.length; i++) {
+    if (i !== 0 && !(test[i].target.equals(test[i - 1].hashed))) {
+      return false
+    }
+
+    list.push(new anchor.web3.PublicKey(test[i].value))
+  }
+
+  return true
+}
+
 describe("solana_escrow", () => {
 
   anchor.setProvider(anchor.AnchorProvider.env());
@@ -208,12 +326,25 @@ describe("solana_escrow", () => {
 
   const recipients = []
 
+
   before(async () => {
+
 
     await payer.generate(provider.connection)
     await token.createMint(provider.connection, payer.keypair)
     await payer.airdrop(provider.connection, token, payer.keypair)
     await prog.getPDA(provider.connection, program, token, payer.keypair)
+
+    const receiver = new User()
+    await receiver.generate(provider.connection)
+    await receiver.airdrop(provider.connection, token, receiver.keypair)
+
+    recipients.push({
+      currency: "SOL",
+      receiver,
+      // root: merkleRoot,
+      // nodes: [payer.address],
+    })
 
     console.log("GENERATED:")
   });
@@ -237,8 +368,6 @@ describe("solana_escrow", () => {
       .signers([payer.keypair])
       .rpc();
 
-    console.log("Your transaction signature", tx);
-
     const blockhash = await provider.connection.getLatestBlockhash()
 
     await provider.connection.confirmTransaction({
@@ -247,9 +376,10 @@ describe("solana_escrow", () => {
     }, "confirmed")
 
     const state = await program.account.programAuthority.fetch(signer)
-    const buffer = await provider.connection.getAccountInfoAndContext(signer)
 
-    console.log(state, buffer)
+    assert(state.isInitialized, 'new program authority is initialized.')
+    assert(state.isSigner, 'new program authority is signer.')
+    assert(state.seeds == "signer", 'seeds is set')
 
   });
 
@@ -284,7 +414,6 @@ describe("solana_escrow", () => {
       .signers([payer.keypair])
       .rpc();
 
-    console.log("Your transaction signature", tx);
 
     const blockhash = await provider.connection.getLatestBlockhash()
 
@@ -293,150 +422,202 @@ describe("solana_escrow", () => {
       signature: tx,
     }, "confirmed")
 
-    const buffer = await provider.connection.getAccountInfoAndContext(tokenAccount)
-
-    console.log(buffer)
-
-  });
-
-
-  it("Create Escrow Sol Account", async () => {
-
-    const hash = createHash('sha256')
-    const receiver = anchor.web3.Keypair.generate()
-
-    hash.update(receiver.publicKey.toBuffer())
-    const merkleRoot = hash.digest()
-
-    const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
-      [
-        payer.keypair.publicKey.toBuffer(),
-        merkleRoot
-      ],
-      program.programId
-    )
-
-    const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("signer")],
-      program.programId
-    )
+    const state = await provider.connection.getAccountInfoAndContext(tokenAccount)
+    const buffer = state.value.data
+    const mint = borsh.publicKey("mint").decode(buffer)
+    const owner = borsh.publicKey("owner").decode(buffer, 32)
 
 
-    recipients.push({
-      currency: "SOL",
-      user: receiver,
-      root: merkleRoot,
-      nodes: [payer.address],
-    })
+    assert(owner.equals(signer))
+    assert(mint.equals(token.mint.publicKey))
 
-    const tx = await program.methods
-      .openEscrowTargetSol({
-        amount: new anchor.BN(100),
-        merkleRoot: {
-          hash: [...merkleRoot]
-        }
-      })
-      .accounts({
-        sender: payer.keypair.publicKey,
-        programAuthority: signer,
-        newEscrowAccount: escrow,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .signers([payer.keypair])
-      .rpc()
-
-    const blockhash = await provider.connection.getLatestBlockhash()
-
-    await provider.connection.confirmTransaction({
-      ...blockhash,
-      signature: tx,
-    }, "confirmed")
-
-    const state = await program.account.escrowAccount.fetch(escrow)
-    const buffer = await provider.connection.getAccountInfoAndContext(escrow)
-
-
-    console.log(buffer.value.data)
-    console.log(state)
-
-
-    console.log(await provider.connection.getBalance(signer))
-  });
-
-
-  it("Create Escrow Token Account", async () => {
-
-    const hash = createHash('sha256')
-    const receiver = anchor.web3.Keypair.generate()
-
-    hash.update(receiver.publicKey.toBuffer())
-    const merkleRoot = hash.digest()
-
-    const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
-      [
-        payer.keypair.publicKey.toBuffer(),
-        merkleRoot
-      ],
-      program.programId
-    )
-
-    const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("signer")],
-      program.programId
-    )
-
-    const tokenAccount = await getAssociatedTokenAddress(
-      token.mint.publicKey,
-      signer,
-      true
-    )
-
-
-    const tx = await program.methods
-      .openEscrowTargetToken({
-        amount: new anchor.BN(100),
-        merkleRoot: {
-          hash: [...merkleRoot]
-        }
-      })
-      .accounts({
-        sender: payer.keypair.publicKey,
-        programAuthority: signer,
-        newEscrowAccount: escrow,
-        senderToken: payer.associatedTokenAccount,
-        authorityToken: tokenAccount,
-        mint: token.mint.publicKey,
-        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: anchor.web3.SystemProgram.programId,
-      })
-      .signers([payer.keypair])
-      .rpc()
-
-    const blockhash = await provider.connection.getLatestBlockhash()
-
-    await provider.connection.confirmTransaction({
-      ...blockhash,
-      signature: tx,
-    }, "confirmed")
-
-    const state = await program.account.escrowAccount.fetch(escrow)
-    const buffer = await provider.connection.getAccountInfoAndContext(escrow)
-
-
-    console.log(buffer.value.data)
-    console.log(state)
-
-
-    console.log(await provider.connection.getBalance(signer))
   });
 
 
   describe("", () => {
 
     before(async () => {
-      const payer = recipients[0].user
+      const list = [
+        recipients[0].receiver.keypair.publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        recipients[0].receiver.keypair.publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer()
+      ]
+
+      const nodes = createMerleRoot(list, 5)
+      const payer = recipients[0].receiver.keypair
+
       const tx = await provider.connection.requestAirdrop(payer.publicKey, 1000 * anchor.web3.LAMPORTS_PER_SOL)
+      const blockhash = await provider.connection.getLatestBlockhash()
+
+      await provider.connection.confirmTransaction({
+        ...blockhash,
+        signature: tx,
+      }, "confirmed")
+
+      recipients[0].nodes = nodes
+    })
+
+
+    it("Create Escrow Sol Account", async () => {
+
+      const merkleRoot = recipients[0].nodes.slice(-1)[0]
+
+      const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          // I don't thinkthe pay should be tied to the escrow account
+          payer.keypair.publicKey.toBuffer(),
+          merkleRoot.toBuffer()
+        ],
+        program.programId
+      )
+
+
+      const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("signer")],
+        program.programId
+      )
+
+      const preBalance = await provider.connection.getBalance(signer)
+
+      const tx = await program.methods
+        .openEscrowTargetSol({
+          amount: new anchor.BN(100 * LAMPORTS_PER_SOL),
+          period: new anchor.BN(360),
+          merkleRoot: merkleRoot
+        })
+        .accounts({
+          sender: payer.keypair.publicKey,
+          programAuthority: signer,
+          newEscrowAccount: escrow,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([payer.keypair])
+        .rpc()
+
+      const blockhash = await provider.connection.getLatestBlockhash()
+
+      await provider.connection.confirmTransaction({
+        ...blockhash,
+        signature: tx,
+      }, "confirmed")
+
+      const state = await program.account.escrowAccount.fetch(escrow)
+      const postBalance = await provider.connection.getBalance(signer)
+
+      assert(state.merkleRoot.equals(new anchor.web3.PublicKey(merkleRoot)), 'valid merkle root')
+      assert(state.balance.eq(new anchor.BN(100 * LAMPORTS_PER_SOL)), "balance amount recorded")
+      assert(state.maturityDate > state.initialDate, 'maturity date set')
+      assert(postBalance - preBalance == 100 * LAMPORTS_PER_SOL, 'authority SOL balance incrased')
+    });
+
+
+    it("Create Escrow Token Account", async () => {
+
+      const merkleRoot = recipients[0].nodes.slice(-1)[0]
+
+      const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          payer.keypair.publicKey.toBuffer(),
+          merkleRoot.toBuffer(),
+          token.mint.publicKey.toBuffer(),
+        ],
+        program.programId
+      )
+
+      const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("signer")],
+        program.programId
+      )
+
+      const tokenAccount = await getAssociatedTokenAddress(
+        token.mint.publicKey,
+        signer,
+        true
+      )
+
+      const preBalance = await getAccount(provider.connection, tokenAccount)
+
+
+      const tx = await program.methods
+        .openEscrowTargetToken({
+          amount: new anchor.BN(10 * LAMPORTS_PER_SOL),
+          period: new anchor.BN(360),
+          merkleRoot: merkleRoot
+        })
+        .accounts({
+          sender: payer.keypair.publicKey,
+          programAuthority: signer,
+          newEscrowAccount: escrow,
+          senderToken: payer.associatedTokenAccount,
+          authorityToken: tokenAccount,
+          mint: token.mint.publicKey,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+        })
+        .signers([payer.keypair])
+        .rpc()
+
+      const blockhash = await provider.connection.getLatestBlockhash()
+
+      await provider.connection.confirmTransaction({
+        ...blockhash,
+        signature: tx,
+      }, "confirmed")
+
+      const state = await program.account.escrowAccount.fetch(escrow)
+      const postBalance = await getAccount(provider.connection, tokenAccount)
+
+      assert(state.merkleRoot.equals(new anchor.web3.PublicKey(merkleRoot)), 'valid merkle root')
+      assert(state.balance.eq(new anchor.BN(10 * LAMPORTS_PER_SOL)), "balance amount recorded")
+      assert(state.maturityDate > state.initialDate, 'maturity date set')
+      assert(postBalance.amount > preBalance.amount, 'authority SOL balance increased')
+      assert(state.asset.token.mint.equals(token.mint.publicKey), 'Valid token mint')
+
+    });
+
+
+    it("Collect Escrow On Sol", async () => {
+
+      const user = recipients[0]
+      const merkleRoot = recipients[0].nodes.slice(-1)[0]
+
+      const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("signer")],
+        program.programId
+      )
+
+
+      const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+        [
+          payer.keypair.publicKey.toBuffer(),
+          merkleRoot.toBuffer()
+        ],
+        program.programId
+      )
+
+
+      const input = recipients[0].nodes.slice(0, -1)
+
+      const tx = await program.methods
+        .collectEscrowOnSol(
+          input,
+          5
+        )
+        .accounts({
+          signer: user.receiver.keypair.publicKey,
+          programAuthority: signer,
+          escrowAccount: escrow,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([user.receiver.keypair])
+        .rpc()
+
       const blockhash = await provider.connection.getLatestBlockhash()
 
       await provider.connection.confirmTransaction({
@@ -445,34 +626,52 @@ describe("solana_escrow", () => {
       }, "confirmed")
     })
 
-    const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("signer")],
-      program.programId
-    )
 
+    it("Collect Escrow On Token", async () => {
 
-    it("Collect Escrow On Sol", async () => {
+      const user = recipients[0]
+      const merkleRoot = recipients[0].nodes.slice(-1)[0]
 
-      const data = recipients[0]
+      const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("signer")],
+        program.programId
+      )
 
 
       const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
         [
           payer.keypair.publicKey.toBuffer(),
-          data.root
+          merkleRoot.toBuffer(),
+          token.mint.publicKey.toBuffer(),
         ],
         program.programId
       )
 
+      const tokenAccount = await getAssociatedTokenAddress(
+        token.mint.publicKey,
+        signer,
+        true
+      )
+
+      const path = recipients[0].nodes.slice(0, -1)
+
       const tx = await program.methods
-        .collectEscrowOnSol()
+        .collectEscrowOnToken(
+          path,
+          5
+        )
         .accounts({
-          signer: data.user.publicKey,
+          signer: user.receiver.keypair.publicKey,
           programAuthority: signer,
           escrowAccount: escrow,
-          systemProgram: SystemProgram.programId,
+          authorityToken: tokenAccount,
+          recipientToken: user.receiver.associatedTokenAccount,
+          mint: token.mint.publicKey,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
         })
-        .signers([data.user])
+        .signers([user.receiver.keypair])
         .rpc()
 
       const blockhash = await provider.connection.getLatestBlockhash()
@@ -483,6 +682,10 @@ describe("solana_escrow", () => {
       }, "confirmed")
     })
   })
+
+
+
+
 
 
 });
