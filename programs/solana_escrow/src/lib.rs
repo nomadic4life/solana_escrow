@@ -153,14 +153,14 @@ pub mod solana_escrow {
             return err!(MyError::VotingInProgress);
         }
 
-        let clock = Clock::get()?;
-        if escrow_account.maturity_date > clock.unix_timestamp {
-            return err!(MyError::UnlockConditionFail);
-        }
-
         let target = 100_000_000;
         if !(escrow_account.candidates[ipos as usize - 1] > target) {
             return err!(MyError::InvalidCandidate);
+        }
+
+        let clock = Clock::get()?;
+        if escrow_account.maturity_date > clock.unix_timestamp {
+            return err!(MyError::UnlockConditionFail);
         }
 
         let mut pos = ipos;
@@ -214,14 +214,14 @@ pub mod solana_escrow {
             return err!(MyError::VotingInProgress);
         }
 
-        let clock = Clock::get()?;
-        if escrow_account.maturity_date > clock.unix_timestamp {
-            return err!(MyError::UnlockConditionFail);
-        }
-
         let target = 100_000_000;
         if !(escrow_account.candidates[ipos as usize - 1] > target) {
             return err!(MyError::InvalidCandidate);
+        }
+
+        let clock = Clock::get()?;
+        if escrow_account.maturity_date > clock.unix_timestamp {
+            return err!(MyError::UnlockConditionFail);
         }
 
         // should abstract this functionality.
@@ -311,6 +311,7 @@ pub mod solana_escrow {
 #[error_code]
 pub enum MyError {
     #[msg("MyAccount may only hold data below 100")]
+    // wrong name?
     DataTooLarge,
 
     #[msg("unlock condition is not met.")]
@@ -320,6 +321,7 @@ pub enum MyError {
     VotingIsClosed,
 
     #[msg("position too large")]
+    // not using?
     PositionTooLarge,
 
     #[msg("voting in progress")]
@@ -551,6 +553,7 @@ pub struct EscrowAccount {
     pub candidates: Vec<u64>,
     pub is_open: bool,
     pub asset: AssetAccountType,
+    // need have isCollected check so receipient can only claim once
 }
 
 impl EscrowAccount {

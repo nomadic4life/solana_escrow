@@ -134,7 +134,7 @@ class Token {
         this.mint.publicKey,
         associatedToken,
         this.mintAuthority.publicKey,
-        10 * LAMPORTS_PER_SOL
+        100 * LAMPORTS_PER_SOL
       )
     )
 
@@ -168,7 +168,7 @@ class User {
 
     const payer = anchor.web3.Keypair.generate()
 
-    const tx = await connection.requestAirdrop(payer.publicKey, 1000 * anchor.web3.LAMPORTS_PER_SOL)
+    const tx = await connection.requestAirdrop(payer.publicKey, 10000 * anchor.web3.LAMPORTS_PER_SOL)
     const blockhash = await connection.getLatestBlockhash()
 
     await connection.confirmTransaction({
@@ -212,8 +212,6 @@ class User {
     return [signer, bump]
   }
 }
-
-
 
 
 const createMerleRoot = (list, pos) => {
@@ -335,16 +333,34 @@ describe("solana_escrow", () => {
     await payer.airdrop(provider.connection, token, payer.keypair)
     await prog.getPDA(provider.connection, program, token, payer.keypair)
 
-    const receiver = new User()
-    await receiver.generate(provider.connection)
-    await receiver.airdrop(provider.connection, token, receiver.keypair)
+    {
 
-    recipients.push({
-      currency: "SOL",
-      receiver,
-      // root: merkleRoot,
-      // nodes: [payer.address],
-    })
+      const receiver = new User()
+      await receiver.generate(provider.connection)
+      await receiver.airdrop(provider.connection, token, receiver.keypair)
+
+      recipients.push({
+        currency: "SOL",
+        receiver,
+        // root: merkleRoot,
+        // nodes: [payer.address],
+      })
+    }
+
+    {
+
+      const receiver = new User()
+      await receiver.generate(provider.connection)
+      await receiver.airdrop(provider.connection, token, receiver.keypair)
+
+      recipients.push({
+        currency: "SOL",
+        receiver,
+        // root: merkleRoot,
+        // nodes: [payer.address],
+      })
+    }
+
 
     console.log("GENERATED:")
   });
@@ -631,6 +647,7 @@ describe("solana_escrow", () => {
       }, "confirmed")
     })
 
+
     it("Vote -> Token target", async () => {
 
       const merkleRoot = recipients[0].nodes.slice(-1)[0]
@@ -670,7 +687,6 @@ describe("solana_escrow", () => {
         signature: tx,
       }, "confirmed")
     })
-
 
 
     it("Collect Escrow On Sol", async () => {
@@ -774,9 +790,693 @@ describe("solana_escrow", () => {
     })
   })
 
+  describe("Validation Checks", () => {
+
+    before(async () => {
+      const pos = 5
+      const list = [
+        recipients[1].receiver.keypair.publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        recipients[1].receiver.keypair.publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer(),
+        anchor.web3.Keypair.generate().publicKey.toBuffer()
+      ]
+
+      const nodes = createMerleRoot(list, pos)
+      const payer = recipients[1].receiver.keypair
+
+      const tx = await provider.connection.requestAirdrop(payer.publicKey, 1000 * anchor.web3.LAMPORTS_PER_SOL)
+      const blockhash = await provider.connection.getLatestBlockhash()
+
+      await provider.connection.confirmTransaction({
+        ...blockhash,
+        signature: tx,
+      }, "confirmed")
+
+      recipients[1].nodes = nodes
+      recipients[1].size = list.length
+      recipients[1].pos = pos
+    })
+
+    describe("On SOL", () => {
+
+      before(async () => {
+
+        const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+        const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+          [
+            // I don't thinkt he payer should be tied to the escrow account
+            payer.keypair.publicKey.toBuffer(),
+            merkleRoot.toBuffer()
+          ],
+          program.programId
+        )
+
+
+        const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+          [Buffer.from("signer")],
+          program.programId
+        )
+
+        const tx = await program.methods
+          .openEscrowTargetSol({
+            amount: new anchor.BN(100 * LAMPORTS_PER_SOL),
+            // testing the period
+            period: new anchor.BN(360),
+            merkleRoot: merkleRoot,
+            size: new anchor.BN(recipients[0].size),
+          })
+          .accounts({
+            sender: payer.keypair.publicKey,
+            programAuthority: signer,
+            newEscrowAccount: escrow,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([payer.keypair])
+          .rpc()
+
+        const blockhash = await provider.connection.getLatestBlockhash()
+
+        await provider.connection.confirmTransaction({
+          ...blockhash,
+          signature: tx,
+        }, "confirmed")
+      })
+
+      it("VotingInProgress", async () => {
+
+        const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+        const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+          [
+            // I don't thinkt he payer should be tied to the escrow account
+            payer.keypair.publicKey.toBuffer(),
+            merkleRoot.toBuffer()
+          ],
+          program.programId
+        )
+
+
+        const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+          [Buffer.from("signer")],
+          program.programId
+        )
+
+        try {
+          const user = recipients[1]
+
+          const input = recipients[1].nodes.slice(0, -1)
+
+          const tx = await program.methods
+            .collectEscrowOnSol(
+              input,
+              recipients[1].pos
+            )
+            .accounts({
+              signer: user.receiver.keypair.publicKey,
+              programAuthority: signer,
+              escrowAccount: escrow,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([user.receiver.keypair])
+            .rpc()
+
+          const blockhash = await provider.connection.getLatestBlockhash()
+
+          await provider.connection.confirmTransaction({
+            ...blockhash,
+            signature: tx,
+          }, "confirmed")
+
+
+        } catch (err) {
+          assert(err.error.errorCode.code === 'VotingInProgress', 'vote in progress')
+        }
+
+      })
+
+      describe("After Vote", () => {
+
+        before(async () => {
+
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer(),
+            ],
+            program.programId
+          )
+
+          const tx = await program.methods
+            .vote(
+              recipients[1].pos,
+              new anchor.BN(10 * LAMPORTS_PER_SOL)
+            )
+            .accounts({
+              signer: payer.address,
+              programAuthority: signer,
+              escrowAccount: escrow,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([payer.keypair])
+            .rpc()
+
+          const blockhash = await provider.connection.getLatestBlockhash()
+
+          await provider.connection.confirmTransaction({
+            ...blockhash,
+            signature: tx,
+          }, "confirmed")
+
+        })
+
+        it("VotingIsClosed", async () => {
+
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer(),
+            ],
+            program.programId
+          )
+
+          try {
+
+            const tx = await program.methods
+              .vote(
+                recipients[1].pos,
+                new anchor.BN(10 * LAMPORTS_PER_SOL)
+              )
+              .accounts({
+                signer: payer.address,
+                programAuthority: signer,
+                escrowAccount: escrow,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([payer.keypair])
+              .rpc()
+
+            const blockhash = await provider.connection.getLatestBlockhash()
+
+            await provider.connection.confirmTransaction({
+              ...blockhash,
+              signature: tx,
+            }, "confirmed")
+
+          } catch (err) {
+            assert(err.error.errorCode.code === 'VotingIsClosed', 'Voting session is clossed')
+          }
+
+
+
+        })
+
+        it("InvalidCandidate", async () => {
+
+          const user = recipients[1]
+          const input = recipients[1].nodes.slice(0, -1)
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              // I don't thinkt he payer should be tied to the escrow account
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer()
+            ],
+            program.programId
+          )
+
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+
+          try {
+
+            const tx = await program.methods
+              .collectEscrowOnSol(
+                input,
+                recipients[1].pos + 1
+              )
+              .accounts({
+                signer: user.receiver.keypair.publicKey,
+                programAuthority: signer,
+                escrowAccount: escrow,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([user.receiver.keypair])
+              .rpc()
+
+            const blockhash = await provider.connection.getLatestBlockhash()
+
+            await provider.connection.confirmTransaction({
+              ...blockhash,
+              signature: tx,
+            }, "confirmed")
+
+
+          } catch (err) {
+            assert(err.error.errorCode.code === 'InvalidCandidate', 'Invalid Candidate')
+          }
+
+        })
+
+        it("UnlockConditionFail", async () => {
+
+          const user = recipients[1]
+          const input = recipients[1].nodes.slice(0, -1)
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              // I don't thinkt he payer should be tied to the escrow account
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer()
+            ],
+            program.programId
+          )
+
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+
+          try {
+
+            const tx = await program.methods
+              .collectEscrowOnSol(
+                input,
+                recipients[1].pos
+              )
+              .accounts({
+                signer: user.receiver.keypair.publicKey,
+                programAuthority: signer,
+                escrowAccount: escrow,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([user.receiver.keypair])
+              .rpc()
+
+            const blockhash = await provider.connection.getLatestBlockhash()
+
+            await provider.connection.confirmTransaction({
+              ...blockhash,
+              signature: tx,
+            }, "confirmed")
+
+
+          } catch (err) {
+            assert(err.error.errorCode.code === 'UnlockConditionFail', 'Escrow Account has not reached Maturity Date')
+          }
+
+        })
+      })
+
+
+    })
+
+
+    describe("On Token", () => {
+
+      before(async () => {
+
+        const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+        const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+          [
+            payer.keypair.publicKey.toBuffer(),
+            merkleRoot.toBuffer(),
+            token.mint.publicKey.toBuffer(),
+          ],
+          program.programId
+        )
+
+        const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+          [Buffer.from("signer")],
+          program.programId
+        )
+
+        const tokenAccount = await getAssociatedTokenAddress(
+          token.mint.publicKey,
+          signer,
+          true
+        )
+
+
+        const tx = await program.methods
+          .openEscrowTargetToken({
+            amount: new anchor.BN(1 * LAMPORTS_PER_SOL),
+            period: new anchor.BN(360),
+
+            merkleRoot: merkleRoot,
+            size: new anchor.BN(recipients[1].size),
+          })
+          .accounts({
+            sender: payer.keypair.publicKey,
+            programAuthority: signer,
+            newEscrowAccount: escrow,
+            senderToken: payer.associatedTokenAccount,
+            authorityToken: tokenAccount,
+            mint: token.mint.publicKey,
+            associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+          })
+          .signers([payer.keypair])
+          .rpc()
+
+        const blockhash = await provider.connection.getLatestBlockhash()
+
+        await provider.connection.confirmTransaction({
+          ...blockhash,
+          signature: tx,
+        }, "confirmed")
+
+      })
+
+      it("VotingInProgress", async () => {
+
+        const user = recipients[1]
+        const merkleRoot = recipients[1].nodes.slice(-1)[0]
+        const input = recipients[1].nodes.slice(0, -1)
+
+        const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+          [
+            // I don't thinkt he payer should be tied to the escrow account
+            payer.keypair.publicKey.toBuffer(),
+            merkleRoot.toBuffer(),
+            token.mint.publicKey.toBuffer()
+          ],
+          program.programId
+        )
+
+
+        const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+          [Buffer.from("signer")],
+          program.programId
+        )
+
+
+        const tokenAccount = await getAssociatedTokenAddress(
+          token.mint.publicKey,
+          signer,
+          true
+        )
+
+
+        try {
+
+          const tx = await program.methods
+            .collectEscrowOnToken(
+              input,
+              recipients[1].pos
+            )
+            .accounts({
+              signer: user.receiver.keypair.publicKey,
+              programAuthority: signer,
+              escrowAccount: escrow,
+              recipientToken: user.receiver.associatedTokenAccount,
+              authorityToken: tokenAccount,
+              mint: token.mint.publicKey,
+              associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([user.receiver.keypair])
+            .rpc()
+
+          const blockhash = await provider.connection.getLatestBlockhash()
+
+          await provider.connection.confirmTransaction({
+            ...blockhash,
+            signature: tx,
+          }, "confirmed")
+
+
+        } catch (err) {
+          assert(err.error.errorCode.code === 'VotingInProgress', 'vote in progress')
+        }
+
+      })
+
+      describe("After Vote", () => {
+
+        before(async () => {
+
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer(),
+              token.mint.publicKey.toBuffer()
+            ],
+            program.programId
+          )
+
+          const tx = await program.methods
+            .vote(
+              recipients[1].pos,
+              new anchor.BN(10 * LAMPORTS_PER_SOL)
+            )
+            .accounts({
+              signer: payer.address,
+              programAuthority: signer,
+              escrowAccount: escrow,
+              systemProgram: SystemProgram.programId,
+            })
+            .signers([payer.keypair])
+            .rpc()
+
+          const blockhash = await provider.connection.getLatestBlockhash()
+
+          await provider.connection.confirmTransaction({
+            ...blockhash,
+            signature: tx,
+          }, "confirmed")
+
+        })
+
+        it("VotingIsClosed", async () => {
+
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer(),
+            ],
+            program.programId
+          )
+
+          try {
+
+            const tx = await program.methods
+              .vote(
+                recipients[1].pos,
+                new anchor.BN(10 * LAMPORTS_PER_SOL)
+              )
+              .accounts({
+                signer: payer.address,
+                programAuthority: signer,
+                escrowAccount: escrow,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([payer.keypair])
+              .rpc()
+
+            const blockhash = await provider.connection.getLatestBlockhash()
+
+            await provider.connection.confirmTransaction({
+              ...blockhash,
+              signature: tx,
+            }, "confirmed")
+
+          } catch (err) {
+            assert(err.error.errorCode.code === 'VotingIsClosed', 'Voting session is clossed')
+          }
+
+
+
+        })
+
+        it("InvalidCandidate", async () => {
+
+          const user = recipients[1]
+          const input = recipients[1].nodes.slice(0, -1)
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              // I don't thinkt he payer should be tied to the escrow account
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer(),
+              token.mint.publicKey.toBuffer()
+            ],
+            program.programId
+          )
+
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+
+          const tokenAccount = await getAssociatedTokenAddress(
+            token.mint.publicKey,
+            signer,
+            true
+          )
+
+
+
+          try {
+
+            const tx = await program.methods
+              .collectEscrowOnToken(
+                input,
+                recipients[1].pos + 1
+              )
+              .accounts({
+                signer: user.receiver.keypair.publicKey,
+                programAuthority: signer,
+                escrowAccount: escrow,
+                recipientToken: user.receiver.associatedTokenAccount,
+                authorityToken: tokenAccount,
+                mint: token.mint.publicKey,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([user.receiver.keypair])
+              .rpc()
+
+            const blockhash = await provider.connection.getLatestBlockhash()
+
+            await provider.connection.confirmTransaction({
+              ...blockhash,
+              signature: tx,
+            }, "confirmed")
+
+
+          } catch (err) {
+            assert(err.error.errorCode.code === 'InvalidCandidate', 'Invalid Candidate')
+          }
+
+        })
+
+        it("UnlockConditionFail", async () => {
+
+          const user = recipients[1]
+          const input = recipients[1].nodes.slice(0, -1)
+          const merkleRoot = recipients[1].nodes.slice(-1)[0]
+
+          const [escrow] = anchor.web3.PublicKey.findProgramAddressSync(
+            [
+              // I don't thinkt he payer should be tied to the escrow account
+              payer.keypair.publicKey.toBuffer(),
+              merkleRoot.toBuffer(),
+              token.mint.publicKey.toBuffer()
+            ],
+            program.programId
+          )
+
+
+          const [signer] = anchor.web3.PublicKey.findProgramAddressSync(
+            [Buffer.from("signer")],
+            program.programId
+          )
+
+
+          const tokenAccount = await getAssociatedTokenAddress(
+            token.mint.publicKey,
+            signer,
+            true
+          )
+
+
+
+          try {
+
+            const tx = await program.methods
+              .collectEscrowOnToken(
+                input,
+                recipients[1].pos
+              )
+              .accounts({
+                signer: user.receiver.keypair.publicKey,
+                programAuthority: signer,
+                escrowAccount: escrow,
+                recipientToken: user.receiver.associatedTokenAccount,
+                authorityToken: tokenAccount,
+                mint: token.mint.publicKey,
+                associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+                tokenProgram: TOKEN_PROGRAM_ID,
+                systemProgram: SystemProgram.programId,
+              })
+              .signers([user.receiver.keypair])
+              .rpc()
+
+            const blockhash = await provider.connection.getLatestBlockhash()
+
+            await provider.connection.confirmTransaction({
+              ...blockhash,
+              signature: tx,
+            }, "confirmed")
+
+
+          } catch (err) {
+            assert(err.error.errorCode.code === 'UnlockConditionFail', 'Escrow Account has not reached Maturity Date')
+          }
+
+        })
+      })
+
+
+
+    })
 
 
 
 
+
+
+
+
+
+  })
 
 });
